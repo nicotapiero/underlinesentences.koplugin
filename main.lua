@@ -257,15 +257,26 @@ function SentenceExperiment:getSentenceFromXPointer(start_xp)
 
     -- Expand the range to sentence boundaries recognized by
     -- the document engine.
-    local sentence_start, sentence_end =
-        document:extendXPointersToSentenceSegment(
-            start_xp,
-            probe_end
-        )
+    --
+    -- IMPORTANT: extendXPointersToSentenceSegment does NOT return two
+    -- XPointers. It returns a single table (or nil), shaped like the
+    -- "selected_text" objects used elsewhere in KOReader:
+    --   { pos0 = <xpointer>, pos1 = <xpointer>, text = <string> }
+    -- (see frontend/apps/reader/modules/readerhighlight.lua, where the
+    -- whole return value is assigned straight into self.selected_text).
+    -- Capturing it as `sentence_start, sentence_end` silently left
+    -- sentence_end as nil on every call, which is why sentence
+    -- detection always failed.
+    local extended = document:extendXPointersToSentenceSegment(
+        start_xp,
+        probe_end
+    )
 
-    if not sentence_start or not sentence_end then
+    if not extended or not extended.pos0 or not extended.pos1 then
         return nil, nil
     end
+
+    local sentence_start, sentence_end = extended.pos0, extended.pos1
 
     -- compareXPointers(a, b):
     --   1  -> b is after a
