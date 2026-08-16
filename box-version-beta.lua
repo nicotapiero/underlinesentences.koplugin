@@ -1,17 +1,32 @@
 --[[
-    Sentence Experiment - Continuous Sentence Outline
+    Sentence Experiment - Continuous Outline For Every Sentence
 
-    Version 2026-08-16.14
+    Version 2026-08-16.15
 
-    Finds the first sentence on the current page and draws
-    one continuous stepped outline around the actual text
-    geometry.
+    This version:
 
-    Multi-line sentences are represented as a single outline
-    following the left and right edges of each visual line.
+      - Finds every sentence on the current page.
+      - Uses KOReader XPointers for sentence boundaries.
+      - Gets the screen geometry for each sentence independently.
+      - Groups each sentence's screen boxes into visual lines.
+      - Builds one continuous stepped outline around each sentence.
+      - Draws all sentence outlines simultaneously.
 
-    The outline deliberately does NOT become one large
-    bounding rectangle around the entire sentence.
+    A multi-line sentence is NOT enclosed in one large bounding
+    rectangle. Its outline follows the actual left/right edges of
+    each visual line.
+
+    Example:
+
+        ┌──────────────────────────────────┐
+        │ This is a sentence that wraps    │
+        │ onto another line of the page.   │
+        └──────────────────────────────────┘
+
+    Internally this is represented as a stepped polygon following
+    the union of the individual line rectangles.
+
+    The EPUB/document itself is never modified.
 --]]
 
 
@@ -45,7 +60,7 @@ local Screen =
 
 
 local PLUGIN_VERSION =
-    "2026-08-16.14"
+    "2026-08-16.15"
 
 
 ------------------------------------------------------------
@@ -60,6 +75,16 @@ local SentenceExperiment =
     is_doc_only = false,
 
     enabled = false,
+
+    --------------------------------------------------------
+    -- Safety limit for sentence enumeration.
+    --------------------------------------------------------
+
+    max_sentences_per_page = 100,
+
+    --------------------------------------------------------
+    -- Safety limit for the word-by-word sentence walk.
+    --------------------------------------------------------
 
     max_words_per_sentence = 80,
 }
@@ -80,7 +105,19 @@ function SentenceExperiment:init()
     self.ui.menu:registerToMainMenu(self)
 
 
-    self.test_boxes = nil
+    --------------------------------------------------------
+    -- Each entry contains:
+    --
+    -- {
+    --     index = ...,
+    --     start_xp = ...,
+    --     end_xp = ...,
+    --     text = ...,
+    --     boxes = ...,
+    -- }
+    --------------------------------------------------------
+
+    self.test_sentences = nil
 
 
     --------------------------------------------------------
@@ -109,7 +146,7 @@ function SentenceExperiment:init()
 
 
                 ------------------------------------------------
-                -- Only draw onto the real screen.
+                -- Only draw on the actual screen.
                 ------------------------------------------------
 
                 if bb ~= Screen.bb then
@@ -131,23 +168,30 @@ function SentenceExperiment:init()
                 end
 
 
-                local boxes =
-                    plugin.test_boxes
+                local sentences =
+                    plugin.test_sentences
 
 
-                if not boxes then
+                if not sentences then
                     return
                 end
 
 
                 ------------------------------------------------
-                -- Draw one continuous sentence outline.
+                -- Draw every sentence independently.
                 ------------------------------------------------
 
-                plugin:drawSentenceOutline(
-                    bb,
-                    boxes
-                )
+                for _, sentence in ipairs(sentences) do
+
+                    if sentence.boxes
+                        and #sentence.boxes > 0 then
+
+                        plugin:drawSentenceOutline(
+                            bb,
+                            sentence.boxes
+                        )
+                    end
+                end
             end
 
 
@@ -183,9 +227,9 @@ function SentenceExperiment:addToMainMenu(menu_items)
                 text_func = function()
 
                     if self.enabled then
-                        return _("Outline test: ON")
+                        return _("Sentence outlines: ON")
                     else
-                        return _("Outline test: OFF")
+                        return _("Sentence outlines: OFF")
                     end
                 end,
 
@@ -201,28 +245,28 @@ function SentenceExperiment:addToMainMenu(menu_items)
 
             {
                 text =
-                    _("Find sentence outline"),
+                    _("Find sentence outlines"),
 
                 enabled_func = function()
                     return self.ui.document ~= nil
                 end,
 
                 callback = function()
-                    self:findSentenceBoxes()
+                    self:markCurrentPage()
                 end,
             },
 
 
             {
                 text =
-                    _("List first sentence"),
+                    _("List sentences on page"),
 
                 enabled_func = function()
                     return self.ui.document ~= nil
                 end,
 
                 callback = function()
-                    self:listSentence()
+                    self:listCurrentPageSentences()
                 end,
             },
         },
@@ -242,11 +286,11 @@ function SentenceExperiment:toggle()
 
     if self.enabled then
 
-        self:findSentenceBoxes()
+        self:markCurrentPage()
 
     else
 
-        self.test_boxes = nil
+        self.test_sentences = nil
 
         UIManager:setDirty(
             self.ui.view,
@@ -298,9 +342,50 @@ function SentenceExperiment:getCurrentPageStart()
     end
 
 
-    return document:getNextVisibleWordStart(
-        page_xp
-    )
+    local word_xp =
+        document:getNextVisibleWordStart(
+            page_xp
+        )
+
+
+    if word_xp then
+        return word_xp
+    end
+
+
+    return page_xp
+end
+
+
+------------------------------------------------------------
+-- Determine whether an XPointer belongs to current page
+------------------------------------------------------------
+
+function SentenceExperiment:isXPointerOnCurrentPage(xp)
+
+    local document =
+        self.ui.document
+
+    if not document
+        or not xp then
+
+        return false
+    end
+
+
+    local current_page =
+        document:getCurrentPage()
+
+    if not current_page then
+        return false
+    end
+
+
+    local page =
+        document:getPageFromXPointer(xp)
+
+
+    return page == current_page
 end
 
 
@@ -337,6 +422,15 @@ local ABBREVIATIONS = {
     ["al"] = true,
     ["cf"] = true,
     ["ca"] = true,
+    ["cap"] = true,
+
+    ["ch"] = true,
+    ["ed"] = true,
+    ["esp"] = true,
+    ["est"] = true,
+
+    ["gen"] = true,
+    ["gov"] = true,
 
     ["inc"] = true,
     ["ltd"] = true,
@@ -344,8 +438,14 @@ local ABBREVIATIONS = {
     ["corp"] = true,
 
     ["dept"] = true,
+
     ["min"] = true,
     ["max"] = true,
+
+    ["misc"] = true,
+    ["pp"] = true,
+
+    ["univ"] = true,
 
     ["am"] = true,
     ["pm"] = true,
@@ -356,7 +456,7 @@ local ABBREVIATIONS = {
 -- Sentence boundary
 ------------------------------------------------------------
 
-local function isSentenceBoundary(
+local function looksLikeSentenceBoundary(
     word_text,
     gap_text
 )
@@ -365,6 +465,11 @@ local function isSentenceBoundary(
         return false
     end
 
+
+    --------------------------------------------------------
+    -- Sentence-ending punctuation must be the first
+    -- non-whitespace character in the gap.
+    --------------------------------------------------------
 
     if not gap_text:match(
         "^%s*[%.!?]"
@@ -375,7 +480,7 @@ local function isSentenceBoundary(
 
 
     --------------------------------------------------------
-    -- Question/exclamation marks are unambiguous.
+    -- ! and ? are unambiguous.
     --------------------------------------------------------
 
     if not gap_text:match(
@@ -424,10 +529,10 @@ end
 
 
 ------------------------------------------------------------
--- Find sentence
+-- Find one sentence beginning at an XPointer
 ------------------------------------------------------------
 
-function SentenceExperiment:getSentence(
+function SentenceExperiment:getSentenceFromXPointer(
     start_xp
 )
 
@@ -460,8 +565,19 @@ function SentenceExperiment:getSentence(
         word_end
 
 
+    --------------------------------------------------------
+    -- If we actually encountered a sentence boundary,
+    -- this contains the correct XPointer at which the next
+    -- sentence begins.
+    --------------------------------------------------------
+
+    local resume_from =
+        nil
+
+
     for _ = 1,
         self.max_words_per_sentence do
+
 
         local word_text =
             document:getTextFromXPointers(
@@ -477,23 +593,34 @@ function SentenceExperiment:getSentence(
 
 
         if not next_word_start then
+
+            sentence_end =
+                word_end
+
             break
         end
 
 
-        local gap =
+        local gap_text =
             document:getTextFromXPointers(
                 word_end,
                 next_word_start
             ) or ""
 
 
-        if isSentenceBoundary(
+        ----------------------------------------------------
+        -- Sentence boundary found.
+        ----------------------------------------------------
+
+        if looksLikeSentenceBoundary(
             word_text,
-            gap
+            gap_text
         ) then
 
             sentence_end =
+                next_word_start
+
+            resume_from =
                 next_word_start
 
             break
@@ -507,6 +634,31 @@ function SentenceExperiment:getSentence(
 
 
         if not next_word_end then
+
+            sentence_end =
+                word_end
+
+            break
+        end
+
+
+        ----------------------------------------------------
+        -- Protect against non-advancing XPointers.
+        ----------------------------------------------------
+
+        local comparison =
+            document:compareXPointers(
+                word_end,
+                next_word_end
+            )
+
+
+        if comparison == nil
+            or comparison <= 0 then
+
+            sentence_end =
+                word_end
+
             break
         end
 
@@ -522,144 +674,225 @@ function SentenceExperiment:getSentence(
     end
 
 
-    return start_xp, sentence_end
+    --------------------------------------------------------
+    -- Verify the sentence actually advances.
+    --------------------------------------------------------
+
+    local comparison =
+        document:compareXPointers(
+            start_xp,
+            sentence_end
+        )
+
+
+    if comparison == nil
+        or comparison <= 0 then
+
+        return nil, nil, nil
+    end
+
+
+    return
+        start_xp,
+        sentence_end,
+        resume_from
 end
 
 
 ------------------------------------------------------------
--- Draw one horizontal or vertical line
---
--- The sentence outline is intentionally composed only of
--- horizontal and vertical framebuffer rectangles.
+-- Enumerate every sentence on current page
 ------------------------------------------------------------
 
-function SentenceExperiment:drawLine(
-    bb,
-    x1,
-    y1,
-    x2,
-    y2,
-    thickness
-)
+function SentenceExperiment:getCurrentPageSentences()
 
-    x1 =
-        math.floor(x1 + 0.5)
+    local document =
+        self.ui.document
 
-    y1 =
-        math.floor(y1 + 0.5)
-
-    x2 =
-        math.floor(x2 + 0.5)
-
-    y2 =
-        math.floor(y2 + 0.5)
-
-
-    if x1 == x2
-        and y1 == y2 then
-
-        return
+    if not document then
+        return {}
     end
 
 
-    --------------------------------------------------------
-    -- Horizontal.
-    --------------------------------------------------------
+    local first_xp =
+        self:getCurrentPageStart()
 
-    if y1 == y2 then
-
-        local x =
-            math.min(x1, x2)
-
-        local w =
-            math.abs(x2 - x1) + 1
-
-
-        bb:paintRect(
-            x,
-            y1,
-            w,
-            thickness,
-            Blitbuffer.COLOR_BLACK
-        )
-
-        return
+    if not first_xp then
+        return {}
     end
 
 
-    --------------------------------------------------------
-    -- Vertical.
-    --------------------------------------------------------
-
-    if x1 == x2 then
-
-        local y =
-            math.min(y1, y2)
-
-        local h =
-            math.abs(y2 - y1) + 1
+    local sentences = {}
 
 
-        bb:paintRect(
-            x1,
-            y,
-            thickness,
-            h,
-            Blitbuffer.COLOR_BLACK
-        )
-
-        return
-    end
+    local current_xp =
+        first_xp
 
 
-    --------------------------------------------------------
-    -- Fallback diagonal.
-    --
-    -- Normally the sentence outline never needs this.
-    --------------------------------------------------------
-
-    local dx =
-        x2 - x1
-
-    local dy =
-        y2 - y1
-
-    local steps =
-        math.max(
-            math.abs(dx),
-            math.abs(dy)
-        )
+    for i = 1,
+        self.max_sentences_per_page do
 
 
-    if steps <= 0 then
-        return
-    end
+        ----------------------------------------------------
+        -- Stop once we leave the current page.
+        ----------------------------------------------------
+
+        if not self:isXPointerOnCurrentPage(
+            current_xp
+        ) then
+
+            break
+        end
 
 
-    for i = 0, steps do
+        local sentence_start,
+            sentence_end,
+            resume_from =
 
-        local t =
-            i / steps
-
-        local x =
-            math.floor(
-                x1 + dx * t + 0.5
-            )
-
-        local y =
-            math.floor(
-                y1 + dy * t + 0.5
+            self:getSentenceFromXPointer(
+                current_xp
             )
 
 
-        bb:paintRect(
-            x,
-            y,
-            thickness,
-            thickness,
-            Blitbuffer.COLOR_BLACK
+        if not sentence_start
+            or not sentence_end then
+
+            break
+        end
+
+
+        ----------------------------------------------------
+        -- The sentence must begin on this page.
+        ----------------------------------------------------
+
+        if not self:isXPointerOnCurrentPage(
+            sentence_start
+        ) then
+
+            break
+        end
+
+
+        local sentence_text =
+            document:getTextFromXPointers(
+                sentence_start,
+                sentence_end
+            )
+
+
+        if not sentence_text
+            or sentence_text == "" then
+
+            break
+        end
+
+
+        table.insert(
+            sentences,
+            {
+                index = i,
+
+                start_xp =
+                    sentence_start,
+
+                end_xp =
+                    sentence_end,
+
+                text =
+                    sentence_text,
+
+                boxes = {},
+            }
+        )
+
+
+        logger.dbg(
+            "SentenceExperiment: sentence",
+            i,
+            sentence_start,
+            sentence_end,
+            sentence_text
+        )
+
+
+        ----------------------------------------------------
+        -- Find next sentence.
+        --
+        -- resume_from is already the start of the next word
+        -- when we stopped on punctuation.
+        ----------------------------------------------------
+
+        local next_xp =
+            resume_from
+
+
+        if not next_xp then
+
+            next_xp =
+                document:getNextVisibleWordStart(
+                    sentence_end
+                )
+        end
+
+
+        if not next_xp then
+            break
+        end
+
+
+        ----------------------------------------------------
+        -- Protect against non-advancing XPointer.
+        ----------------------------------------------------
+
+        local next_comparison =
+            document:compareXPointers(
+                current_xp,
+                next_xp
+            )
+
+
+        if next_comparison == nil
+            or next_comparison <= 0 then
+
+            logger.warn(
+                "SentenceExperiment: XPointer did not advance",
+                current_xp,
+                next_xp,
+                next_comparison
+            )
+
+            break
+        end
+
+
+        ----------------------------------------------------
+        -- Once the next sentence begins on another page,
+        -- we're done with this page.
+        ----------------------------------------------------
+
+        if not self:isXPointerOnCurrentPage(
+            next_xp
+        ) then
+
+            break
+        end
+
+
+        current_xp =
+            next_xp
+    end
+
+
+    if #sentences >=
+        self.max_sentences_per_page then
+
+        logger.warn(
+            "SentenceExperiment: reached sentence safety limit",
+            self.max_sentences_per_page
         )
     end
+
+
+    return sentences
 end
 
 
@@ -701,8 +934,7 @@ function SentenceExperiment:getLineBoxes(boxes)
 
 
             ------------------------------------------------
-            -- Find a line with a sufficiently close
-            -- vertical center.
+            -- Find an existing visual line.
             ------------------------------------------------
 
             for _, line in ipairs(lines) do
@@ -731,7 +963,7 @@ function SentenceExperiment:getLineBoxes(boxes)
 
 
             ------------------------------------------------
-            -- Add box to existing line.
+            -- Add to existing line.
             ------------------------------------------------
 
             if found_line then
@@ -821,7 +1053,7 @@ end
 
 
 ------------------------------------------------------------
--- Add a point to polygon
+-- Add a point without creating consecutive duplicates
 ------------------------------------------------------------
 
 local function addPoint(
@@ -829,10 +1061,6 @@ local function addPoint(
     x,
     y
 )
-
-    --------------------------------------------------------
-    -- Avoid consecutive duplicate points.
-    --------------------------------------------------------
 
     local previous =
         points[#points]
@@ -857,7 +1085,7 @@ end
 
 
 ------------------------------------------------------------
--- Build the outside contour of the line rectangles
+-- Build stepped outline around line rectangles
 ------------------------------------------------------------
 
 function SentenceExperiment:buildSentenceOutline(
@@ -875,7 +1103,7 @@ function SentenceExperiment:buildSentenceOutline(
 
 
     --------------------------------------------------------
-    -- Single line.
+    -- Single-line sentence.
     --------------------------------------------------------
 
     if #lines == 1 then
@@ -883,11 +1111,13 @@ function SentenceExperiment:buildSentenceOutline(
         local line =
             lines[1]
 
+
         addPoint(
             points,
             line.x,
             line.y
         )
+
 
         addPoint(
             points,
@@ -895,26 +1125,27 @@ function SentenceExperiment:buildSentenceOutline(
             line.y
         )
 
+
         addPoint(
             points,
             line.x + line.w,
             line.y + line.h
         )
 
+
         addPoint(
             points,
             line.x,
             line.y + line.h
         )
+
 
         return points
     end
 
 
     --------------------------------------------------------
-    -- RIGHT SIDE
-    --
-    -- Start at the top-right corner of the first line.
+    -- Start at top-left of first line.
     --------------------------------------------------------
 
     local first =
@@ -927,6 +1158,11 @@ function SentenceExperiment:buildSentenceOutline(
         first.y
     )
 
+
+    --------------------------------------------------------
+    -- Top edge of first line.
+    --------------------------------------------------------
+
     addPoint(
         points,
         first.x + first.w,
@@ -935,10 +1171,7 @@ function SentenceExperiment:buildSentenceOutline(
 
 
     --------------------------------------------------------
-    -- Walk down the right side.
-    --
-    -- When the next line is shorter/longer, make a
-    -- horizontal step at the boundary between the lines.
+    -- RIGHT SIDE
     --------------------------------------------------------
 
     for i = 1, #lines do
@@ -950,9 +1183,14 @@ function SentenceExperiment:buildSentenceOutline(
         local current_right =
             current.x + current.w
 
+
         local current_bottom =
             current.y + current.h
 
+
+        ----------------------------------------------------
+        -- Down to bottom of current line.
+        ----------------------------------------------------
 
         addPoint(
             points,
@@ -972,8 +1210,7 @@ function SentenceExperiment:buildSentenceOutline(
 
 
             ------------------------------------------------
-            -- Move horizontally to the next line's right
-            -- edge.
+            -- Step horizontally to next line's right edge.
             ------------------------------------------------
 
             addPoint(
@@ -986,7 +1223,7 @@ function SentenceExperiment:buildSentenceOutline(
 
 
     --------------------------------------------------------
-    -- Bottom-right -> bottom-left.
+    -- Bottom edge of final line.
     --------------------------------------------------------
 
     local last =
@@ -1010,9 +1247,9 @@ function SentenceExperiment:buildSentenceOutline(
             lines[i]
 
 
-        ------------------------------------------------
-        -- Move vertically to top of current line.
-        ------------------------------------------------
+        ----------------------------------------------------
+        -- Up to top of current line.
+        ----------------------------------------------------
 
         addPoint(
             points,
@@ -1046,10 +1283,158 @@ end
 
 
 ------------------------------------------------------------
--- Draw small filled squares at corners
---
--- This makes the 90-degree steps look cleaner on e-ink
--- displays and prevents tiny gaps at corners.
+-- Draw one horizontal, vertical, or fallback diagonal line
+------------------------------------------------------------
+
+function SentenceExperiment:drawLine(
+    bb,
+    x1,
+    y1,
+    x2,
+    y2,
+    thickness
+)
+
+    x1 =
+        math.floor(x1 + 0.5)
+
+    y1 =
+        math.floor(y1 + 0.5)
+
+    x2 =
+        math.floor(x2 + 0.5)
+
+    y2 =
+        math.floor(y2 + 0.5)
+
+
+    if x1 == x2
+        and y1 == y2 then
+
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Horizontal.
+    --------------------------------------------------------
+
+    if y1 == y2 then
+
+        local x =
+            math.min(
+                x1,
+                x2
+            )
+
+
+        local w =
+            math.abs(
+                x2 - x1
+            ) + 1
+
+
+        bb:paintRect(
+            x,
+            y1,
+            w,
+            thickness,
+            Blitbuffer.COLOR_BLACK
+        )
+
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Vertical.
+    --------------------------------------------------------
+
+    if x1 == x2 then
+
+        local y =
+            math.min(
+                y1,
+                y2
+            )
+
+
+        local h =
+            math.abs(
+                y2 - y1
+            ) + 1
+
+
+        bb:paintRect(
+            x1,
+            y,
+            thickness,
+            h,
+            Blitbuffer.COLOR_BLACK
+        )
+
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Fallback diagonal.
+    --
+    -- The normal sentence outline should never need this,
+    -- because all outline transitions are horizontal or
+    -- vertical.
+    --------------------------------------------------------
+
+    local dx =
+        x2 - x1
+
+    local dy =
+        y2 - y1
+
+
+    local steps =
+        math.max(
+            math.abs(dx),
+            math.abs(dy)
+        )
+
+
+    if steps <= 0 then
+        return
+    end
+
+
+    for i = 0, steps do
+
+        local t =
+            i / steps
+
+
+        local x =
+            math.floor(
+                x1 + dx * t + 0.5
+            )
+
+
+        local y =
+            math.floor(
+                y1 + dy * t + 0.5
+            )
+
+
+        bb:paintRect(
+            x,
+            y,
+            thickness,
+            thickness,
+            Blitbuffer.COLOR_BLACK
+        )
+    end
+end
+
+
+------------------------------------------------------------
+-- Reinforce an outline corner
 ------------------------------------------------------------
 
 function SentenceExperiment:drawCorner(
@@ -1076,7 +1461,7 @@ end
 
 
 ------------------------------------------------------------
--- Draw continuous sentence outline
+-- Draw one complete sentence outline
 ------------------------------------------------------------
 
 function SentenceExperiment:drawSentenceOutline(
@@ -1092,12 +1477,13 @@ function SentenceExperiment:drawSentenceOutline(
 
 
     --------------------------------------------------------
-    -- Convert raw screen boxes into one rectangle per
-    -- visual line.
+    -- Convert raw boxes into one rectangle per visual line.
     --------------------------------------------------------
 
     local lines =
-        self:getLineBoxes(boxes)
+        self:getLineBoxes(
+            boxes
+        )
 
 
     if #lines == 0 then
@@ -1106,11 +1492,13 @@ function SentenceExperiment:drawSentenceOutline(
 
 
     --------------------------------------------------------
-    -- Build the stepped outside contour.
+    -- Build continuous stepped contour.
     --------------------------------------------------------
 
     local points =
-        self:buildSentenceOutline(lines)
+        self:buildSentenceOutline(
+            lines
+        )
 
 
     if #points < 2 then
@@ -1118,21 +1506,19 @@ function SentenceExperiment:drawSentenceOutline(
     end
 
 
-    --------------------------------------------------------
-    -- Outline thickness.
-    --------------------------------------------------------
-
-    local thickness = 2
+    local thickness =
+        2
 
 
     --------------------------------------------------------
-    -- Draw every contour segment.
+    -- Draw contour.
     --------------------------------------------------------
 
     for i = 1, #points do
 
         local a =
             points[i]
+
 
         local b =
             points[
@@ -1152,7 +1538,7 @@ function SentenceExperiment:drawSentenceOutline(
 
 
     --------------------------------------------------------
-    -- Reinforce every corner.
+    -- Reinforce corners.
     --------------------------------------------------------
 
     for _, point in ipairs(points) do
@@ -1168,10 +1554,88 @@ end
 
 
 ------------------------------------------------------------
--- Find ALL screen boxes belonging to first sentence
+-- Get screen boxes for one sentence
 ------------------------------------------------------------
 
-function SentenceExperiment:findSentenceBoxes()
+function SentenceExperiment:getSentenceBoxes(
+    sentence
+)
+
+    local document =
+        self.ui.document
+
+
+    if not document
+        or not sentence then
+
+        return {}
+    end
+
+
+    --------------------------------------------------------
+    -- This is deliberately protected.
+    --
+    -- KOReader's native geometry function can fail for
+    -- certain ranges/documents.
+    --------------------------------------------------------
+
+    local ok, boxes =
+        pcall(
+            document.getScreenBoxesFromPositions,
+            document,
+            sentence.start_xp,
+            sentence.end_xp
+        )
+
+
+    if not ok then
+
+        logger.warn(
+            "SentenceExperiment: geometry failed for sentence",
+            sentence.index,
+            boxes
+        )
+
+        return {}
+    end
+
+
+    if not boxes then
+        return {}
+    end
+
+
+    --------------------------------------------------------
+    -- Copy the native table.
+    --------------------------------------------------------
+
+    local copied =
+        {}
+
+
+    for _, box in ipairs(boxes) do
+
+        table.insert(
+            copied,
+            {
+                x = box.x,
+                y = box.y,
+                w = box.w,
+                h = box.h,
+            }
+        )
+    end
+
+
+    return copied
+end
+
+
+------------------------------------------------------------
+-- Find and prepare all sentence outlines on current page
+------------------------------------------------------------
+
+function SentenceExperiment:markCurrentPage()
 
     local document =
         self.ui.document
@@ -1183,136 +1647,86 @@ function SentenceExperiment:findSentenceBoxes()
 
 
     --------------------------------------------------------
-    -- Find first word.
+    -- Enumerate sentences.
     --------------------------------------------------------
 
-    local start_xp =
-        self:getCurrentPageStart()
+    local sentences =
+        self:getCurrentPageSentences()
 
 
-    if not start_xp then
+    if #sentences == 0 then
+
+        self.test_sentences =
+            nil
+
 
         UIManager:show(
             InfoMessage:new{
                 text = _(
-                    "Couldn't find the first word."
+                    "Couldn't find any sentences on this page."
                 ),
             }
         )
 
-        return
-    end
-
-
-    --------------------------------------------------------
-    -- Find first sentence.
-    --------------------------------------------------------
-
-    local sentence_start,
-        sentence_end =
-        self:getSentence(
-            start_xp
-        )
-
-
-    if not sentence_start
-        or not sentence_end then
-
-        UIManager:show(
-            InfoMessage:new{
-                text = _(
-                    "Couldn't find a sentence."
-                ),
-            }
-        )
 
         return
     end
 
 
     --------------------------------------------------------
-    -- Get every screen box belonging to it.
+    -- Get screen geometry for every sentence.
     --------------------------------------------------------
 
-    local ok, boxes =
-        pcall(
-            document.getScreenBoxesFromPositions,
-            document,
-            sentence_start,
-            sentence_end
-        )
+    for _, sentence in ipairs(sentences) do
+
+        sentence.boxes =
+            self:getSentenceBoxes(
+                sentence
+            )
 
 
-    if not ok then
+        if #sentence.boxes > 0 then
 
-        UIManager:show(
-            InfoMessage:new{
-                text =
-                    _("Geometry call failed:\n\n")
-                    .. tostring(boxes),
-            }
-        )
-
-        return
-    end
+            local lines =
+                self:getLineBoxes(
+                    sentence.boxes
+                )
 
 
-    if not boxes
-        or #boxes == 0 then
+            logger.dbg(
+                "SentenceExperiment:",
+                "sentence",
+                sentence.index,
+                "raw boxes",
+                #sentence.boxes,
+                "visual lines",
+                #lines
+            )
+        else
 
-        UIManager:show(
-            InfoMessage:new{
-                text = _(
-                    "No screen boxes returned."
-                ),
-            }
-        )
-
-        return
-    end
-
-
-    --------------------------------------------------------
-    -- Copy the native boxes.
-    --
-    -- We deliberately retain the individual boxes here.
-    -- drawSentenceOutline() performs the visual-line
-    -- grouping later.
-    --------------------------------------------------------
-
-    self.test_boxes = {}
-
-
-    for _, box in ipairs(boxes) do
-
-        table.insert(
-            self.test_boxes,
-            {
-                x = box.x,
-                y = box.y,
-                w = box.w,
-                h = box.h,
-            }
-        )
+            logger.dbg(
+                "SentenceExperiment:",
+                "sentence",
+                sentence.index,
+                "has no screen boxes"
+            )
+        end
     end
 
 
     --------------------------------------------------------
-    -- Diagnostic information.
+    -- Store the complete page state.
     --------------------------------------------------------
 
-    local lines =
-        self:getLineBoxes(
-            self.test_boxes
-        )
+    self.test_sentences =
+        sentences
 
 
     logger.info(
         "SentenceExperiment:",
-        "raw boxes =",
-        #self.test_boxes,
-        "visual lines =",
-        #lines
+        "found",
+        #sentences,
+        "sentences on current page"
     )
 
 
@@ -1328,61 +1742,66 @@ end
 
 
 ------------------------------------------------------------
--- Show sentence text
+-- List sentences on current page
 ------------------------------------------------------------
 
-function SentenceExperiment:listSentence()
+function SentenceExperiment:listCurrentPageSentences()
 
-    local document =
-        self.ui.document
-
-    if not document then
-        return
-    end
+    local sentences =
+        self:getCurrentPageSentences()
 
 
-    local start_xp =
-        self:getCurrentPageStart()
+    if #sentences == 0 then
 
-
-    if not start_xp then
-        return
-    end
-
-
-    local start,
-        finish =
-        self:getSentence(
-            start_xp
+        UIManager:show(
+            InfoMessage:new{
+                text = _(
+                    "Couldn't find any sentences on this page."
+                ),
+            }
         )
 
-
-    if not start
-        or not finish then
-
         return
     end
 
 
-    local text =
-        document:getTextFromXPointers(
-            start,
-            finish
+    local lines = {
+
+        _("Sentences found: ")
+            .. #sentences,
+
+        "",
+    }
+
+
+    for _, sentence in ipairs(sentences) do
+
+        table.insert(
+            lines,
+
+            string.format(
+                "%d. %s",
+                sentence.index,
+                sentence.text
+            )
         )
+    end
 
 
     UIManager:show(
         InfoMessage:new{
             text =
-                _("First sentence:\n\n")
-                .. tostring(text),
+                table.concat(
+                    lines,
+                    "\n"
+                ),
         }
     )
 end
 
 
 ------------------------------------------------------------
--- Page update
+-- Reader lifecycle
 ------------------------------------------------------------
 
 function SentenceExperiment:onPageUpdate()
@@ -1392,17 +1811,23 @@ function SentenceExperiment:onPageUpdate()
     end
 
 
-    self:findSentenceBoxes()
+    --------------------------------------------------------
+    -- Re-enumerate everything because the screen geometry
+    -- changes with the page.
+    --------------------------------------------------------
+
+    self:markCurrentPage()
 end
 
 
 ------------------------------------------------------------
--- Cleanup
+-- Document cleanup
 ------------------------------------------------------------
 
 function SentenceExperiment:onCloseDocument()
 
-    self.test_boxes = nil
+    self.test_sentences =
+        nil
 end
 
 
