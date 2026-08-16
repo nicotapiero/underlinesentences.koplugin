@@ -1,17 +1,19 @@
 --[[
-    Sentence Experiment - Multiple Box Drawing Test
+    Sentence Experiment - Continuous Sentence Outline
 
-    Version 2026-08-16.13
+    Version 2026-08-16.14
 
-    This version draws a rectangle around EVERY screen box
-    returned for the first sentence on the current page.
+    Finds the first sentence on the current page and draws
+    one continuous stepped outline around the actual text
+    geometry.
 
-    It deliberately does NOT yet try to merge the boxes into
-    one sophisticated sentence outline.
+    Multi-line sentences are represented as a single outline
+    following the left and right edges of each visual line.
 
-    The purpose of this version is to establish exactly how
-    KOReader represents a multi-line sentence geometrically.
+    The outline deliberately does NOT become one large
+    bounding rectangle around the entire sentence.
 --]]
+
 
 local WidgetContainer =
     require("ui/widget/container/widgetcontainer")
@@ -38,17 +40,21 @@ local _ =
     require("gettext")
 
 
-local Screen = Device.screen
+local Screen =
+    Device.screen
+
 
 local PLUGIN_VERSION =
-    "2026-08-16.13"
+    "2026-08-16.14"
 
 
 ------------------------------------------------------------
 -- Plugin
 ------------------------------------------------------------
 
-local SentenceExperiment = WidgetContainer:extend{
+local SentenceExperiment =
+    WidgetContainer:extend{
+
     name = "sentenceexperiment",
 
     is_doc_only = false,
@@ -70,7 +76,9 @@ function SentenceExperiment:init()
         PLUGIN_VERSION
     )
 
+
     self.ui.menu:registerToMainMenu(self)
+
 
     self.test_boxes = nil
 
@@ -133,16 +141,13 @@ function SentenceExperiment:init()
 
 
                 ------------------------------------------------
-                -- Draw every box.
+                -- Draw one continuous sentence outline.
                 ------------------------------------------------
 
-                for _, box in ipairs(boxes) do
-
-                    plugin:drawBox(
-                        bb,
-                        box
-                    )
-                end
+                plugin:drawSentenceOutline(
+                    bb,
+                    boxes
+                )
             end
 
 
@@ -178,9 +183,9 @@ function SentenceExperiment:addToMainMenu(menu_items)
                 text_func = function()
 
                     if self.enabled then
-                        return _("Box test: ON")
+                        return _("Outline test: ON")
                     else
-                        return _("Box test: OFF")
+                        return _("Outline test: OFF")
                     end
                 end,
 
@@ -196,7 +201,7 @@ function SentenceExperiment:addToMainMenu(menu_items)
 
             {
                 text =
-                    _("Find sentence boxes"),
+                    _("Find sentence outline"),
 
                 enabled_func = function()
                     return self.ui.document ~= nil
@@ -522,188 +527,643 @@ end
 
 
 ------------------------------------------------------------
--- Safely draw one box
+-- Draw one horizontal or vertical line
+--
+-- The sentence outline is intentionally composed only of
+-- horizontal and vertical framebuffer rectangles.
 ------------------------------------------------------------
 
-function SentenceExperiment:drawBox(
+function SentenceExperiment:drawLine(
     bb,
-    box
+    x1,
+    y1,
+    x2,
+    y2,
+    thickness
 )
 
-    if not box then
-        return
-    end
+    x1 =
+        math.floor(x1 + 0.5)
+
+    y1 =
+        math.floor(y1 + 0.5)
+
+    x2 =
+        math.floor(x2 + 0.5)
+
+    y2 =
+        math.floor(y2 + 0.5)
 
 
-    local bx =
-        tonumber(box.x)
-
-    local by =
-        tonumber(box.y)
-
-    local bw =
-        tonumber(box.w)
-
-    local bh =
-        tonumber(box.h)
-
-
-    if not bx
-        or not by
-        or not bw
-        or not bh then
-
-        return
-    end
-
-
-    if bw <= 0
-        or bh <= 0 then
+    if x1 == x2
+        and y1 == y2 then
 
         return
     end
 
 
     --------------------------------------------------------
-    -- Integer coordinates.
+    -- Horizontal.
     --------------------------------------------------------
 
-    bx =
-        math.floor(bx)
+    if y1 == y2 then
 
-    by =
-        math.floor(by)
+        local x =
+            math.min(x1, x2)
 
-    bw =
-        math.floor(bw)
-
-    bh =
-        math.floor(bh)
+        local w =
+            math.abs(x2 - x1) + 1
 
 
-    --------------------------------------------------------
-    -- Screen dimensions.
-    --------------------------------------------------------
-
-    local screen_w =
-        Screen:getWidth()
-
-    local screen_h =
-        Screen:getHeight()
-
-
-    --------------------------------------------------------
-    -- Clip left.
-    --------------------------------------------------------
-
-    if bx < 0 then
-
-        bw =
-            bw + bx
-
-        bx = 0
-    end
-
-
-    --------------------------------------------------------
-    -- Clip top.
-    --------------------------------------------------------
-
-    if by < 0 then
-
-        bh =
-            bh + by
-
-        by = 0
-    end
-
-
-    --------------------------------------------------------
-    -- Clip right.
-    --------------------------------------------------------
-
-    if bx + bw > screen_w then
-
-        bw =
-            screen_w - bx
-    end
-
-
-    --------------------------------------------------------
-    -- Clip bottom.
-    --------------------------------------------------------
-
-    if by + bh > screen_h then
-
-        bh =
-            screen_h - by
-    end
-
-
-    if bw <= 0
-        or bh <= 0 then
+        bb:paintRect(
+            x,
+            y1,
+            w,
+            thickness,
+            Blitbuffer.COLOR_BLACK
+        )
 
         return
     end
 
 
     --------------------------------------------------------
-    -- Draw a very thin outline.
+    -- Vertical.
+    --------------------------------------------------------
+
+    if x1 == x2 then
+
+        local y =
+            math.min(y1, y2)
+
+        local h =
+            math.abs(y2 - y1) + 1
+
+
+        bb:paintRect(
+            x1,
+            y,
+            thickness,
+            h,
+            Blitbuffer.COLOR_BLACK
+        )
+
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Fallback diagonal.
+    --
+    -- Normally the sentence outline never needs this.
+    --------------------------------------------------------
+
+    local dx =
+        x2 - x1
+
+    local dy =
+        y2 - y1
+
+    local steps =
+        math.max(
+            math.abs(dx),
+            math.abs(dy)
+        )
+
+
+    if steps <= 0 then
+        return
+    end
+
+
+    for i = 0, steps do
+
+        local t =
+            i / steps
+
+        local x =
+            math.floor(
+                x1 + dx * t + 0.5
+            )
+
+        local y =
+            math.floor(
+                y1 + dy * t + 0.5
+            )
+
+
+        bb:paintRect(
+            x,
+            y,
+            thickness,
+            thickness,
+            Blitbuffer.COLOR_BLACK
+        )
+    end
+end
+
+
+------------------------------------------------------------
+-- Group raw screen boxes into visual lines
+------------------------------------------------------------
+
+function SentenceExperiment:getLineBoxes(boxes)
+
+    local lines = {}
+
+
+    for _, box in ipairs(boxes) do
+
+        local x =
+            tonumber(box.x)
+
+        local y =
+            tonumber(box.y)
+
+        local w =
+            tonumber(box.w)
+
+        local h =
+            tonumber(box.h)
+
+
+        if x and y and w and h
+            and w > 0
+            and h > 0 then
+
+
+            local center_y =
+                y + h / 2
+
+
+            local found_line =
+                nil
+
+
+            ------------------------------------------------
+            -- Find a line with a sufficiently close
+            -- vertical center.
+            ------------------------------------------------
+
+            for _, line in ipairs(lines) do
+
+                local line_center =
+                    line.y + line.h / 2
+
+
+                local tolerance =
+                    math.min(
+                        h,
+                        line.h
+                    ) * 0.50
+
+
+                if math.abs(
+                    center_y - line_center
+                ) <= tolerance then
+
+                    found_line =
+                        line
+
+                    break
+                end
+            end
+
+
+            ------------------------------------------------
+            -- Add box to existing line.
+            ------------------------------------------------
+
+            if found_line then
+
+                local old_right =
+                    found_line.x
+                    + found_line.w
+
+                local old_bottom =
+                    found_line.y
+                    + found_line.h
+
+
+                local new_right =
+                    math.max(
+                        old_right,
+                        x + w
+                    )
+
+                local new_bottom =
+                    math.max(
+                        old_bottom,
+                        y + h
+                    )
+
+
+                found_line.x =
+                    math.min(
+                        found_line.x,
+                        x
+                    )
+
+                found_line.y =
+                    math.min(
+                        found_line.y,
+                        y
+                    )
+
+                found_line.w =
+                    new_right
+                    - found_line.x
+
+                found_line.h =
+                    new_bottom
+                    - found_line.y
+
+
+            else
+
+                ------------------------------------------------
+                -- New visual line.
+                ------------------------------------------------
+
+                table.insert(
+                    lines,
+                    {
+                        x = x,
+                        y = y,
+                        w = w,
+                        h = h,
+                    }
+                )
+            end
+        end
+    end
+
+
+    --------------------------------------------------------
+    -- Sort top-to-bottom.
+    --------------------------------------------------------
+
+    table.sort(
+        lines,
+        function(a, b)
+
+            if a.y == b.y then
+                return a.x < b.x
+            end
+
+            return a.y < b.y
+        end
+    )
+
+
+    return lines
+end
+
+
+------------------------------------------------------------
+-- Add a point to polygon
+------------------------------------------------------------
+
+local function addPoint(
+    points,
+    x,
+    y
+)
+
+    --------------------------------------------------------
+    -- Avoid consecutive duplicate points.
+    --------------------------------------------------------
+
+    local previous =
+        points[#points]
+
+
+    if previous
+        and previous.x == x
+        and previous.y == y then
+
+        return
+    end
+
+
+    table.insert(
+        points,
+        {
+            x = x,
+            y = y,
+        }
+    )
+end
+
+
+------------------------------------------------------------
+-- Build the outside contour of the line rectangles
+------------------------------------------------------------
+
+function SentenceExperiment:buildSentenceOutline(
+    lines
+)
+
+    local points = {}
+
+
+    if not lines
+        or #lines == 0 then
+
+        return points
+    end
+
+
+    --------------------------------------------------------
+    -- Single line.
+    --------------------------------------------------------
+
+    if #lines == 1 then
+
+        local line =
+            lines[1]
+
+        addPoint(
+            points,
+            line.x,
+            line.y
+        )
+
+        addPoint(
+            points,
+            line.x + line.w,
+            line.y
+        )
+
+        addPoint(
+            points,
+            line.x + line.w,
+            line.y + line.h
+        )
+
+        addPoint(
+            points,
+            line.x,
+            line.y + line.h
+        )
+
+        return points
+    end
+
+
+    --------------------------------------------------------
+    -- RIGHT SIDE
+    --
+    -- Start at the top-right corner of the first line.
+    --------------------------------------------------------
+
+    local first =
+        lines[1]
+
+
+    addPoint(
+        points,
+        first.x,
+        first.y
+    )
+
+    addPoint(
+        points,
+        first.x + first.w,
+        first.y
+    )
+
+
+    --------------------------------------------------------
+    -- Walk down the right side.
+    --
+    -- When the next line is shorter/longer, make a
+    -- horizontal step at the boundary between the lines.
+    --------------------------------------------------------
+
+    for i = 1, #lines do
+
+        local current =
+            lines[i]
+
+
+        local current_right =
+            current.x + current.w
+
+        local current_bottom =
+            current.y + current.h
+
+
+        addPoint(
+            points,
+            current_right,
+            current_bottom
+        )
+
+
+        local next =
+            lines[i + 1]
+
+
+        if next then
+
+            local next_right =
+                next.x + next.w
+
+
+            ------------------------------------------------
+            -- Move horizontally to the next line's right
+            -- edge.
+            ------------------------------------------------
+
+            addPoint(
+                points,
+                next_right,
+                current_bottom
+            )
+        end
+    end
+
+
+    --------------------------------------------------------
+    -- Bottom-right -> bottom-left.
+    --------------------------------------------------------
+
+    local last =
+        lines[#lines]
+
+
+    addPoint(
+        points,
+        last.x,
+        last.y + last.h
+    )
+
+
+    --------------------------------------------------------
+    -- LEFT SIDE, walking upward.
+    --------------------------------------------------------
+
+    for i = #lines, 1, -1 do
+
+        local current =
+            lines[i]
+
+
+        ------------------------------------------------
+        -- Move vertically to top of current line.
+        ------------------------------------------------
+
+        addPoint(
+            points,
+            current.x,
+            current.y
+        )
+
+
+        local previous =
+            lines[i - 1]
+
+
+        if previous then
+
+            ------------------------------------------------
+            -- Step horizontally to previous line's left
+            -- edge.
+            ------------------------------------------------
+
+            addPoint(
+                points,
+                previous.x,
+                current.y
+            )
+        end
+    end
+
+
+    return points
+end
+
+
+------------------------------------------------------------
+-- Draw small filled squares at corners
+--
+-- This makes the 90-degree steps look cleaner on e-ink
+-- displays and prevents tiny gaps at corners.
+------------------------------------------------------------
+
+function SentenceExperiment:drawCorner(
+    bb,
+    x,
+    y,
+    thickness
+)
+
+    local half =
+        math.floor(
+            thickness / 2
+        )
+
+
+    bb:paintRect(
+        math.floor(x) - half,
+        math.floor(y) - half,
+        thickness,
+        thickness,
+        Blitbuffer.COLOR_BLACK
+    )
+end
+
+
+------------------------------------------------------------
+-- Draw continuous sentence outline
+------------------------------------------------------------
+
+function SentenceExperiment:drawSentenceOutline(
+    bb,
+    boxes
+)
+
+    if not boxes
+        or #boxes == 0 then
+
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Convert raw screen boxes into one rectangle per
+    -- visual line.
+    --------------------------------------------------------
+
+    local lines =
+        self:getLineBoxes(boxes)
+
+
+    if #lines == 0 then
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Build the stepped outside contour.
+    --------------------------------------------------------
+
+    local points =
+        self:buildSentenceOutline(lines)
+
+
+    if #points < 2 then
+        return
+    end
+
+
+    --------------------------------------------------------
+    -- Outline thickness.
     --------------------------------------------------------
 
     local thickness = 2
 
 
     --------------------------------------------------------
-    -- Top.
+    -- Draw every contour segment.
     --------------------------------------------------------
 
-    bb:paintRect(
-        bx,
-        by,
-        bw,
-        thickness,
-        Blitbuffer.COLOR_BLACK
-    )
+    for i = 1, #points do
+
+        local a =
+            points[i]
+
+        local b =
+            points[
+                (i % #points) + 1
+            ]
 
 
-    --------------------------------------------------------
-    -- Bottom.
-    --------------------------------------------------------
-
-    bb:paintRect(
-        bx,
-        by + bh - thickness,
-        bw,
-        thickness,
-        Blitbuffer.COLOR_BLACK
-    )
-
-
-    --------------------------------------------------------
-    -- Left.
-    --------------------------------------------------------
-
-    bb:paintRect(
-        bx,
-        by,
-        thickness,
-        bh,
-        Blitbuffer.COLOR_BLACK
-    )
+        self:drawLine(
+            bb,
+            a.x,
+            a.y,
+            b.x,
+            b.y,
+            thickness
+        )
+    end
 
 
     --------------------------------------------------------
-    -- Right.
+    -- Reinforce every corner.
     --------------------------------------------------------
 
-    bb:paintRect(
-        bx + bw - thickness,
-        by,
-        thickness,
-        bh,
-        Blitbuffer.COLOR_BLACK
-    )
+    for _, point in ipairs(points) do
+
+        self:drawCorner(
+            bb,
+            point.x,
+            point.y,
+            thickness
+        )
+    end
 end
 
 
@@ -813,9 +1273,11 @@ function SentenceExperiment:findSentenceBoxes()
 
 
     --------------------------------------------------------
-    -- Copy the boxes.
+    -- Copy the native boxes.
     --
-    -- Don't retain the native table directly.
+    -- We deliberately retain the individual boxes here.
+    -- drawSentenceOutline() performs the visual-line
+    -- grouping later.
     --------------------------------------------------------
 
     self.test_boxes = {}
@@ -835,10 +1297,22 @@ function SentenceExperiment:findSentenceBoxes()
     end
 
 
+    --------------------------------------------------------
+    -- Diagnostic information.
+    --------------------------------------------------------
+
+    local lines =
+        self:getLineBoxes(
+            self.test_boxes
+        )
+
+
     logger.info(
-        "SentenceExperiment: found",
+        "SentenceExperiment:",
+        "raw boxes =",
         #self.test_boxes,
-        "screen boxes"
+        "visual lines =",
+        #lines
     )
 
 
