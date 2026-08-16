@@ -43,6 +43,12 @@ local logger = require("logger")
 local _ = require("gettext")
 
 
+-- Bump this on every change so it's easy to confirm, from the device
+-- itself, that a freshly copied-over main.lua actually took effect
+-- rather than a stale cached copy still being loaded.
+local PLUGIN_VERSION = "2026-08-16.5"
+
+
 local SentenceExperiment = WidgetContainer:extend{
     name = "sentenceexperiment",
 
@@ -53,6 +59,11 @@ local SentenceExperiment = WidgetContainer:extend{
 
     -- Safety limit while experimenting with sentence enumeration.
     max_sentences_per_page = 100,
+
+    -- Safety limit for the word-by-word sentence-boundary walk below,
+    -- in case a paragraph has no recognizable sentence-ending
+    -- punctuation for an unexpectedly long stretch.
+    max_words_per_sentence = 80,
 }
 
 
@@ -61,6 +72,7 @@ local SentenceExperiment = WidgetContainer:extend{
 ------------------------------------------------------------
 
 function SentenceExperiment:init()
+    logger.info("SentenceExperiment: loaded, version", PLUGIN_VERSION)
     self.ui.menu:registerToMainMenu(self)
 end
 
@@ -71,7 +83,7 @@ end
 
 function SentenceExperiment:addToMainMenu(menu_items)
     menu_items.sentence_experiment = {
-        text = _("Sentence Experiment"),
+        text = _("Sentence Experiment") .. " (" .. PLUGIN_VERSION .. ")",
 
         sub_item_table = {
             {
@@ -121,9 +133,9 @@ function SentenceExperiment:addToMainMenu(menu_items)
 
                 callback = function()
                     UIManager:show(InfoMessage:new{
-                        text = _([[
-Sentence Experiment
-
+                        text = _("Sentence Experiment") .. "\n" ..
+                            _("Version: ") .. PLUGIN_VERSION .. "\n\n" ..
+                            _([[
 This experimental plugin explores whether making sentence boundaries visually salient changes the reading experience.
 
 The original prototype was built with EPUB.js and JavaScript. This version uses KOReader's document and XPointer facilities instead of modifying the EPUB.
@@ -158,16 +170,18 @@ end
 ------------------------------------------------------------
 
 function SentenceExperiment:clearMarks()
-    local document = self.ui.document
+    local view = self.ui.view
 
-    if not document then
+    if not view or not view.highlight then
         return
     end
 
-    -- highlightXPointer(nil) clears the current document highlight(s).
-    pcall(function()
-        document:highlightXPointer(nil)
-    end)
+    -- highlight.temp is KOReader's own scratch slot for temporary,
+    -- non-persisted highlight boxes (also used e.g. for dictionary
+    -- lookup selection previews). Clearing it never touches the
+    -- reader's real saved/persisted highlights, which live in a
+    -- separate table (highlight.saved) that we never write to.
+    view.highlight.temp = {}
 
     UIManager:setDirty(
         self.ui.view,
@@ -237,6 +251,68 @@ end
 
 
 ------------------------------------------------------------
+-- Sentence-boundary heuristics
+------------------------------------------------------------
+
+-- Common abbreviations that end in a period but essentially never
+-- end a sentence.
+local ABBREVIATIONS = {
+    ["mr"] = true, ["mrs"] = true, ["ms"] = true, ["mx"] = true,
+    ["dr"] = true, ["prof"] = true, ["sr"] = true, ["jr"] = true,
+    ["st"] = true, ["ave"] = true, ["blvd"] = true,
+    ["vs"] = true, ["etc"] = true, ["eg"] = true, ["ie"] = true,
+    ["approx"] = true, ["no"] = true, ["vol"] = true, ["fig"] = true,
+    ["al"] = true, ["cf"] = true, ["ca"] = true, ["cap"] = true,
+    ["ch"] = true, ["ed"] = true, ["esp"] = true, ["est"] = true,
+    ["gen"] = true, ["gov"] = true, ["inc"] = true, ["ltd"] = true,
+    ["co"] = true, ["corp"] = true, ["dept"] = true,
+    ["min"] = true, ["max"] = true, ["misc"] = true, ["pp"] = true,
+    ["univ"] = true, ["am"] = true, ["pm"] = true,
+}
+
+-- `word_text` is the word immediately BEFORE the gap being tested,
+-- `gap_text` is whatever visible-word XPointers skip over between
+-- one word and the next -- punctuation, quote marks, whitespace.
+-- KOReader's word-boundary XPointers (getNextVisibleWordStart/End)
+-- do not include punctuation as part of a word at all, so the
+-- sentence-ending character always shows up in the gap, never in
+-- the word text itself.
+local function looksLikeSentenceBoundary(word_text, gap_text)
+    -- Sentence end: '.', '!' or '?' as the first non-whitespace
+    -- character of the gap (quotes/parens may follow it, we don't
+    -- need to check those).
+    if not gap_text:match("^%s*[%.!?]") then
+        return false
+    end
+
+    -- Only '.' is ambiguous (abbreviations, decimals, list markers);
+    -- '!' and '?' are unambiguous sentence ends.
+    if not gap_text:match("^%s*%.") then
+        return true
+    end
+
+    if not word_text or word_text == "" then
+        return true
+    end
+
+    -- Digits immediately before a period: decimal number, list
+    -- marker, or section number -- not a sentence end.
+    if word_text:match("^%d+$") then
+        return false
+    end
+
+    -- Known abbreviation immediately before the period.
+    local last_word = word_text:match("(%a+)$")
+
+    if last_word and ABBREVIATIONS[last_word:lower()] then
+        return false
+    end
+
+    return true
+end
+
+
+------------------------------------------------------------
 -- Find one sentence beginning at or after an XPointer
 ------------------------------------------------------------
 
@@ -247,52 +323,97 @@ function SentenceExperiment:getSentenceFromXPointer(start_xp)
         return nil, nil
     end
 
-    -- Give the document engine a small range beginning at the
-    -- requested position.
-    local probe_end = document:getNextVisibleWordEnd(start_xp)
-
-    if not probe_end then
-        return nil, nil
-    end
-
-    -- Expand the range to sentence boundaries recognized by
-    -- the document engine.
+    -- NOTE: We deliberately do NOT use document:extendXPointersToSentenceSegment()
+    -- here. On the versions/documents this was tested against, it reliably
+    -- returns nil even for plain mid-paragraph xpointers produced moments
+    -- earlier by getNextVisibleWordStart/getNextVisibleWordEnd on the same
+    -- document (see cre.cpp: it bails out whenever either xpointer string
+    -- fails to re-resolve via createXPointer(), which appears to happen for
+    -- word-boundary xpointers in some DOM/version combinations). Rather than
+    -- depend on that engine call, we detect sentence boundaries ourselves.
     --
-    -- IMPORTANT: extendXPointersToSentenceSegment does NOT return two
-    -- XPointers. It returns a single table (or nil), shaped like the
-    -- "selected_text" objects used elsewhere in KOReader:
-    --   { pos0 = <xpointer>, pos1 = <xpointer>, text = <string> }
-    -- (see frontend/apps/reader/modules/readerhighlight.lua, where the
-    -- whole return value is assigned straight into self.selected_text).
-    -- Capturing it as `sentence_start, sentence_end` silently left
-    -- sentence_end as nil on every call, which is why sentence
-    -- detection always failed.
-    local extended = document:extendXPointersToSentenceSegment(
-        start_xp,
-        probe_end
-    )
+    -- Important detail: getNextVisibleWordStart/End treat punctuation as
+    -- NOT part of a word. A word's end XPointer lands right after its
+    -- last letter, before any trailing period/comma/quote, and the next
+    -- word's start XPointer lands after skipping over all of that. That
+    -- means sentence-ending punctuation only ever shows up in the GAP
+    -- between one word's end and the next word's start -- never inside
+    -- the word text itself. So each iteration below inspects that gap,
+    -- not the accumulated word text.
+    local word_start = start_xp
+    local word_end = document:getNextVisibleWordEnd(word_start)
 
-    if not extended or not extended.pos0 or not extended.pos1 then
+    if not word_end then
         return nil, nil
     end
 
-    local sentence_start, sentence_end = extended.pos0, extended.pos1
+    local sentence_end = word_end
+
+    -- Where the NEXT sentence should start from. When we break out
+    -- because we found a real boundary, this is next_word_start --
+    -- which is already a word-start XPointer, so the caller must use
+    -- it directly rather than calling getNextVisibleWordStart() on
+    -- it again (that would skip straight past it to the word after,
+    -- silently eating the first word of every following sentence).
+    -- When we break for any other reason (end of page, safety cap),
+    -- this stays nil and the caller falls back to searching forward
+    -- from sentence_end itself.
+    local resume_from = nil
+
+    for _ = 1, self.max_words_per_sentence do
+        local word_text = document:getTextFromXPointers(word_start, word_end)
+
+        local next_word_start = document:getNextVisibleWordStart(word_end)
+
+        if not next_word_start then
+            -- No more words (end of page/document) -- treat the
+            -- current word's end as the sentence end.
+            sentence_end = word_end
+            break
+        end
+
+        local gap_text = document:getTextFromXPointers(word_end, next_word_start) or ""
+
+        if looksLikeSentenceBoundary(word_text, gap_text) then
+            -- Include the gap itself (punctuation, closing quote)
+            -- in the sentence range, up to the start of the next word.
+            sentence_end = next_word_start
+            resume_from = next_word_start
+            break
+        end
+
+        local next_word_end = document:getNextVisibleWordEnd(next_word_start)
+
+        if not next_word_end then
+            sentence_end = word_end
+            break
+        end
+
+        -- Protect against a non-advancing XPointer.
+        local advance_comparison = document:compareXPointers(word_end, next_word_end)
+
+        if advance_comparison == nil or advance_comparison <= 0 then
+            sentence_end = word_end
+            break
+        end
+
+        word_start = next_word_start
+        word_end = next_word_end
+        sentence_end = word_end
+    end
 
     -- compareXPointers(a, b):
     --   1  -> b is after a
     --   0  -> same
     --  -1  -> b is before a
     -- nil  -> invalid XPointer
-    local comparison = document:compareXPointers(
-        sentence_start,
-        sentence_end
-    )
+    local comparison = document:compareXPointers(start_xp, sentence_end)
 
     if comparison == nil or comparison <= 0 then
-        return nil, nil
+        return nil, nil, nil
     end
 
-    return sentence_start, sentence_end
+    return start_xp, sentence_end, resume_from
 end
 
 
@@ -323,7 +444,7 @@ function SentenceExperiment:getCurrentPageSentences()
             break
         end
 
-        local sentence_start, sentence_end =
+        local sentence_start, sentence_end, resume_from =
             self:getSentenceFromXPointer(current_xp)
 
         if not sentence_start or not sentence_end then
@@ -361,9 +482,16 @@ function SentenceExperiment:getCurrentPageSentences()
             sentence_text
         )
 
-        -- Move forward from the end of the sentence.
-        local next_xp =
-            document:getNextVisibleWordStart(sentence_end)
+        -- Move forward from the end of the sentence. resume_from,
+        -- when set, is already the correct word-start XPointer for
+        -- the next sentence -- reuse it directly instead of calling
+        -- getNextVisibleWordStart(sentence_end) again, which would
+        -- skip past it (see the comment in getSentenceFromXPointer).
+        local next_xp = resume_from
+
+        if not next_xp then
+            next_xp = document:getNextVisibleWordStart(sentence_end)
+        end
 
         if not next_xp then
             break
@@ -408,13 +536,14 @@ end
 
 
 ------------------------------------------------------------
--- Highlight the first sentence on the current page
+-- Highlight alternating sentences on the current page
 ------------------------------------------------------------
 
 function SentenceExperiment:markCurrentPage()
     local document = self.ui.document
+    local view = self.ui.view
 
-    if not document then
+    if not document or not view or not view.highlight then
         return
     end
 
@@ -428,26 +557,68 @@ function SentenceExperiment:markCurrentPage()
         return
     end
 
-    local sentence = sentences[1]
+    local page = document:getCurrentPage()
+    local boxes = {}
 
-    -- Native KOReader selection/highlight rendering.
+    -- Alternate: highlight sentence 1, skip 2, highlight 3, skip 4, ...
+    -- We use view.highlight.temp rather than native selection
+    -- rendering, because that only ever supports one active selection
+    -- at a time -- it can't represent several independent highlighted
+    -- regions on the same page. highlight.temp is KOReader's own
+    -- scratch slot for temporary, non-persisted highlight boxes and
+    -- happily accepts a combined list from several separate ranges.
     --
-    -- This is deliberately limited to one sentence for now.
-    document:getTextFromXPointers(
-        sentence.start_xp,
-        sentence.end_xp,
-        true
-    )
+    -- We use getScreenBoxesFromPositions(pos0, pos1) rather than
+    -- getPageBoxesFromPositions(page, pos0, pos1): the latter needs a
+    -- page number in whatever internal convention the engine expects
+    -- for that specific call, which we were never able to fully pin
+    -- down, and a mismatch there can crash the whole app natively
+    -- (no catchable Lua error, no traceback) rather than failing
+    -- gracefully. getScreenBoxesFromPositions needs no page number at
+    -- all, sidestepping that risk entirely.
+    --
+    -- It's also a call KOReader's own maintainers have noted CAN
+    -- throw ("attempt to get length of local 'word_boxes' (a nil
+    -- value)") for ranges it can't resolve boxes for, so we wrap it
+    -- in pcall and just skip that sentence's boxes on failure rather
+    -- than let it take the app down.
+    for _, sentence in ipairs(sentences) do
+        if sentence.index % 2 == 1 then
+            local ok, sentence_boxes = pcall(
+                document.getScreenBoxesFromPositions,
+                document,
+                sentence.start_xp,
+                sentence.end_xp
+            )
+
+            if not ok then
+                logger.warn(
+                    "SentenceExperiment: getScreenBoxesFromPositions failed for sentence",
+                    sentence.index,
+                    sentence_boxes
+                )
+            elseif sentence_boxes then
+                for _, box in ipairs(sentence_boxes) do
+                    table.insert(boxes, box)
+                end
+            end
+        end
+    end
+
+    view.highlight.temp[page] = boxes
 
     logger.dbg(
-        "SentenceExperiment: marked sentence",
-        sentence.index,
-        sentence.text
+        "SentenceExperiment: marked",
+        #boxes,
+        "boxes across",
+        #sentences,
+        "sentences on page",
+        page
     )
 
     UIManager:setDirty(
         self.ui.view,
-        "full"
+        "ui"
     )
 end
 
