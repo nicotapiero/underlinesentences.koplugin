@@ -46,7 +46,7 @@ local _ = require("gettext")
 -- Bump this on every change so it's easy to confirm, from the device
 -- itself, that a freshly copied-over main.lua actually took effect
 -- rather than a stale cached copy still being loaded.
-local PLUGIN_VERSION = "2026-08-16.6"
+local PLUGIN_VERSION = "2026-08-16.8"
 
 
 local SentenceExperiment = WidgetContainer:extend{
@@ -84,6 +84,10 @@ end
 function SentenceExperiment:addToMainMenu(menu_items)
     menu_items.sentence_experiment = {
         text = _("Sentence Experiment") .. " (" .. PLUGIN_VERSION .. ")",
+
+        -- Places this under the document menu's "Typeset" submenu
+        -- rather than the general main menu.
+        sorting_hint = "typeset",
 
         sub_item_table = {
             {
