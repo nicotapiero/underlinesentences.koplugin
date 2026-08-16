@@ -46,7 +46,7 @@ local _ = require("gettext")
 -- Bump this on every change so it's easy to confirm, from the device
 -- itself, that a freshly copied-over main.lua actually took effect
 -- rather than a stale cached copy still being loaded.
-local PLUGIN_VERSION = "2026-08-16.5"
+local PLUGIN_VERSION = "2026-08-16.6"
 
 
 local SentenceExperiment = WidgetContainer:extend{
@@ -214,7 +214,24 @@ function SentenceExperiment:getCurrentPageStart()
     end
 
     -- A page XPointer does not necessarily point directly at the
-    -- beginning of a word. Move forward to the first visible word.
+    -- beginning of a word. But it sometimes DOES -- e.g. a page that
+    -- happens to start a new paragraph right at its top. In that
+    -- case, calling getNextVisibleWordStart(page_xp) would be wrong:
+    -- that call always returns the NEXT word start strictly AFTER
+    -- the position given to it, never the word already sitting AT
+    -- that position -- so it would skip straight past the page's
+    -- true first word (same bug shape as the sentence-chaining fix
+    -- in getSentenceFromXPointer, one level up).
+    --
+    -- So: first check whether page_xp is already usable as a word
+    -- start directly, by checking that getNextVisibleWordEnd() can
+    -- resolve a word there. Only fall back to searching forward if
+    -- that fails, meaning page_xp landed somewhere before any word
+    -- (e.g. mid-whitespace or at a block boundary).
+    if document:getNextVisibleWordEnd(page_xp) then
+        return page_xp
+    end
+
     local word_xp = document:getNextVisibleWordStart(page_xp)
 
     if word_xp then
