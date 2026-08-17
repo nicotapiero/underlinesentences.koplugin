@@ -36,6 +36,9 @@ local WidgetContainer =
 local InfoMessage =
     require("ui/widget/infomessage")
 
+local SpinWidget =
+    require("ui/widget/spinwidget")
+
 local UIManager =
     require("ui/uimanager")
 
@@ -61,6 +64,13 @@ local Screen =
 
 local PLUGIN_VERSION =
     "2026-08-16.15"
+
+
+local DEFAULT_OUTLINE_THICKNESS =
+    2
+
+local OUTLINE_THICKNESS_SETTING =
+    "sentence_experiment_outline_thickness"
 
 
 ------------------------------------------------------------
@@ -103,6 +113,17 @@ function SentenceExperiment:init()
 
 
     self.ui.menu:registerToMainMenu(self)
+
+
+    --------------------------------------------------------
+    -- Outline thickness, persisted across sessions.
+    --------------------------------------------------------
+
+    self.outline_thickness =
+        G_reader_settings:readSetting(
+            OUTLINE_THICKNESS_SETTING
+        )
+        or DEFAULT_OUTLINE_THICKNESS
 
 
     --------------------------------------------------------
@@ -183,12 +204,12 @@ function SentenceExperiment:init()
 
                 for _, sentence in ipairs(sentences) do
 
-                    if sentence.boxes
-                        and #sentence.boxes > 0 then
+                    if sentence.lines
+                        and #sentence.lines > 0 then
 
                         plugin:drawSentenceOutline(
                             bb,
-                            sentence.boxes
+                            sentence.lines
                         )
                     end
                 end
@@ -269,8 +290,87 @@ function SentenceExperiment:addToMainMenu(menu_items)
                     self:listCurrentPageSentences()
                 end,
             },
+
+
+            {
+                text_func = function()
+
+                    return _("Outline thickness: ")
+                        .. self.outline_thickness
+                        .. " px"
+                end,
+
+                keep_menu_open = true,
+
+                callback = function()
+                    self:showOutlineThicknessDialog()
+                end,
+            },
         },
     }
+end
+
+
+------------------------------------------------------------
+-- Outline thickness setting
+------------------------------------------------------------
+
+function SentenceExperiment:showOutlineThicknessDialog()
+
+    local dialog
+
+
+    dialog =
+        SpinWidget:new{
+
+            value =
+                self.outline_thickness,
+
+            value_min = 1,
+
+            value_max = 8,
+
+            value_step = 1,
+
+            value_hold_step = 2,
+
+            title_text =
+                _("Outline thickness"),
+
+            text = _(
+                "Thickness, in pixels, of the sentence outline."
+            ),
+
+            ok_text =
+                _("Set"),
+
+            default_value =
+                DEFAULT_OUTLINE_THICKNESS,
+
+            callback = function(spin)
+
+                self.outline_thickness =
+                    spin.value
+
+
+                G_reader_settings:saveSetting(
+                    OUTLINE_THICKNESS_SETTING,
+                    spin.value
+                )
+
+
+                if self.enabled then
+
+                    UIManager:setDirty(
+                        self.ui.view,
+                        "full"
+                    )
+                end
+            end,
+        }
+
+
+    UIManager:show(dialog)
 end
 
 
@@ -1053,6 +1153,117 @@ end
 
 
 ------------------------------------------------------------
+-- Decide whether two line boxes sit on the same visual row
+------------------------------------------------------------
+
+local function onSameVisualRow(
+    a,
+    b
+)
+
+    if not a or not b then
+        return false
+    end
+
+
+    local a_center =
+        a.y + a.h / 2
+
+    local b_center =
+        b.y + b.h / 2
+
+
+    local tolerance =
+        math.min(
+            a.h,
+            b.h
+        ) * 0.50
+
+
+    return math.abs(
+        a_center - b_center
+    ) <= tolerance
+end
+
+
+------------------------------------------------------------
+-- Merge touching sentence boundaries
+--
+-- When sentence N ends on the same visual row where sentence
+-- N+1 begins, sentence N's box is stretched right to meet
+-- sentence N+1's left edge exactly, closing the small gap
+-- left by the word-space between them. The two outlines then
+-- share a single seam there instead of drawing two close,
+-- separate lines.
+--
+-- Only the shared boundary's row is touched. Every other
+-- edge of every sentence is left as the actual document
+-- geometry produced.
+------------------------------------------------------------
+
+function SentenceExperiment:linkAdjacentSentenceBoundaries(
+    sentences
+)
+
+    if not sentences then
+        return
+    end
+
+
+    for i = 2, #sentences do
+
+        local previous =
+            sentences[i - 1]
+
+        local current =
+            sentences[i]
+
+
+        if previous.lines
+            and current.lines
+            and #previous.lines > 0
+            and #current.lines > 0 then
+
+            local prev_last =
+                previous.lines[
+                    #previous.lines
+                ]
+
+            local cur_first =
+                current.lines[1]
+
+
+            if onSameVisualRow(
+                prev_last,
+                cur_first
+            ) then
+
+                local shared_x =
+                    cur_first.x
+
+
+                ------------------------------------------------
+                -- Only ever extend rightward. If the boxes
+                -- already touch, overlap, or something unusual
+                -- put the previous box further right than
+                -- expected, leave it alone rather than
+                -- shrinking or flipping it.
+                ------------------------------------------------
+
+                if shared_x >
+                    prev_last.x + prev_last.w then
+
+                    prev_last.w =
+                        shared_x
+                        - prev_last.x
+                end
+            end
+        end
+    end
+end
+
+
+------------------------------------------------------------
 -- Add a point without creating consecutive duplicates
 ------------------------------------------------------------
 
@@ -1466,27 +1677,12 @@ end
 
 function SentenceExperiment:drawSentenceOutline(
     bb,
-    boxes
+    lines
 )
 
-    if not boxes
-        or #boxes == 0 then
+    if not lines
+        or #lines == 0 then
 
-        return
-    end
-
-
-    --------------------------------------------------------
-    -- Convert raw boxes into one rectangle per visual line.
-    --------------------------------------------------------
-
-    local lines =
-        self:getLineBoxes(
-            boxes
-        )
-
-
-    if #lines == 0 then
         return
     end
 
@@ -1507,7 +1703,8 @@ function SentenceExperiment:drawSentenceOutline(
 
 
     local thickness =
-        2
+        self.outline_thickness
+        or DEFAULT_OUTLINE_THICKNESS
 
 
     --------------------------------------------------------
@@ -1687,7 +1884,7 @@ function SentenceExperiment:markCurrentPage()
 
         if #sentence.boxes > 0 then
 
-            local lines =
+            sentence.lines =
                 self:getLineBoxes(
                     sentence.boxes
                 )
@@ -1700,9 +1897,13 @@ function SentenceExperiment:markCurrentPage()
                 "raw boxes",
                 #sentence.boxes,
                 "visual lines",
-                #lines
+                #sentence.lines
             )
         else
+
+            sentence.lines =
+                {}
+
 
             logger.dbg(
                 "SentenceExperiment:",
@@ -1712,6 +1913,22 @@ function SentenceExperiment:markCurrentPage()
             )
         end
     end
+
+
+    --------------------------------------------------------
+    -- Merge adjacent sentence boundaries.
+    --
+    -- Where one sentence ends on the same visual line where
+    -- the next sentence begins, snap the previous sentence's
+    -- box right edge to the next sentence's left edge. This
+    -- turns two close, separate lines (with a sliver of gap
+    -- for the word-space between sentences) into a single
+    -- shared seam.
+    --------------------------------------------------------
+
+    self:linkAdjacentSentenceBoundaries(
+        sentences
+    )
 
 
     --------------------------------------------------------
