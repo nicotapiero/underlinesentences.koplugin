@@ -1,7 +1,7 @@
 --[[
     Sentence Experiment - Continuous Outline For Every Sentence
 
-    Version 2026-08-18.1
+    Version 2026-08-18.2
 
     This version:
 
@@ -14,6 +14,8 @@
       - Splits the gap between same-row adjacent sentences at
         its midpoint, instead of snapping it to the start of
         the next sentence.
+      - Recognizes sentence endings like ")." or "." that are
+        preceded by a closing bracket or quote in the gap.
 
     A multi-line sentence is NOT enclosed in one large bounding
     rectangle. Its outline follows the actual left/right edges of
@@ -66,7 +68,7 @@ local Screen =
 
 
 local PLUGIN_VERSION =
-    "2026-08-18.1"
+    "2026-08-18.2"
 
 
 local DEFAULT_OUTLINE_THICKNESS =
@@ -571,13 +573,18 @@ local function looksLikeSentenceBoundary(
 
     --------------------------------------------------------
     -- Sentence-ending punctuation must be the first
-    -- non-whitespace character in the gap.
+    -- non-whitespace character in the gap, but closing
+    -- brackets/quotes can sit in front of it -- "(see
+    -- below)." or he said "stop." -- so skip over any of
+    -- those first, then look for the actual mark.
     --------------------------------------------------------
 
-    if not gap_text:match(
-        "^%s*[%.!?]"
-    ) then
+    local mark =
+        gap_text:match(
+            "^%s*[%)%]%}\"'”’»›]*([%.!?])"
+        )
 
+    if not mark then
         return false
     end
 
@@ -586,10 +593,7 @@ local function looksLikeSentenceBoundary(
     -- ! and ? are unambiguous.
     --------------------------------------------------------
 
-    if not gap_text:match(
-        "^%s*%."
-    ) then
-
+    if mark ~= "." then
         return true
     end
 
