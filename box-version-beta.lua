@@ -1,7 +1,7 @@
 --[[
     Sentence Experiment - Continuous Outline For Every Sentence
 
-    Version 2026-08-16.15
+    Version 2026-08-18.1
 
     This version:
 
@@ -11,6 +11,9 @@
       - Groups each sentence's screen boxes into visual lines.
       - Builds one continuous stepped outline around each sentence.
       - Draws all sentence outlines simultaneously.
+      - Splits the gap between same-row adjacent sentences at
+        its midpoint, instead of snapping it to the start of
+        the next sentence.
 
     A multi-line sentence is NOT enclosed in one large bounding
     rectangle. Its outline follows the actual left/right edges of
@@ -63,7 +66,7 @@ local Screen =
 
 
 local PLUGIN_VERSION =
-    "2026-08-16.15"
+    "2026-08-18.1"
 
 
 local DEFAULT_OUTLINE_THICKNESS =
@@ -1190,11 +1193,14 @@ end
 -- Merge touching sentence boundaries
 --
 -- When sentence N ends on the same visual row where sentence
--- N+1 begins, sentence N's box is stretched right to meet
--- sentence N+1's left edge exactly, closing the small gap
--- left by the word-space between them. The two outlines then
--- share a single seam there instead of drawing two close,
--- separate lines.
+-- N+1 begins, there's a small gap between them on screen: the
+-- word-space, plus whatever trailing/leading padding the
+-- renderer put on each box. Rather than snapping the seam to
+-- either sentence's edge, it's split down the middle. Sentence
+-- N's box is stretched right and sentence N+1's box is pulled
+-- left to meet at that midpoint. The two outlines then share
+-- a single seam there instead of drawing two close, separate
+-- lines, and neither sentence visually "owns" the whole gap.
 --
 -- Only the shared boundary's row is touched. Every other
 -- edge of every sentence is left as the actual document
@@ -1238,24 +1244,41 @@ function SentenceExperiment:linkAdjacentSentenceBoundaries(
                 cur_first
             ) then
 
-                local shared_x =
+                local prev_right =
+                    prev_last.x
+                    + prev_last.w
+
+                local cur_left =
                     cur_first.x
 
 
                 ------------------------------------------------
-                -- Only ever extend rightward. If the boxes
-                -- already touch, overlap, or something unusual
-                -- put the previous box further right than
-                -- expected, leave it alone rather than
-                -- shrinking or flipping it.
+                -- Only act if there's an actual gap between the
+                -- two boxes (the word-space). If they already
+                -- touch, overlap, or something unusual put the
+                -- previous box further right than expected,
+                -- leave both boxes alone rather than shrinking
+                -- or flipping either one.
                 ------------------------------------------------
 
-                if shared_x >
-                    prev_last.x + prev_last.w then
+                if cur_left > prev_right then
+
+                    local shared_x =
+                        prev_right
+                        + (cur_left - prev_right)
+                        / 2
+
 
                     prev_last.w =
                         shared_x
                         - prev_last.x
+
+                    cur_first.w =
+                        cur_first.w
+                        + (cur_first.x - shared_x)
+
+                    cur_first.x =
+                        shared_x
                 end
             end
         end
