@@ -6,3 +6,4 @@ TODO:
 - [ ] Probably delete all the testing stuff / version numbers / etc
 - [ ] decide if I wanna keep the stored value in g_reader_settings
 - [ ] quotes aren't being boxed correctly - "I am." becomes "[I am." ]
+- [ ] A.M. and P.M. are bound to glitch, also think about case like J.R.R. Tolkien
